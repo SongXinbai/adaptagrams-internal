@@ -1,108 +1,137 @@
-//
-// Created by ersong2 on 2025/4/23.
-//
+// NodeEdgeProcessor.cpp
 #include "org_graph_outside_NativeLibrary.h"
 #include <jni.h>
-#include <iostream>
 #include <vector>
+#include <iostream>
 #include "libdialect/commontypes.h"
 #include "libdialect/graphs.h"
 #include "libdialect/hola.h"
-#include "libdialect/io.h"
 #include "libdialect/opts.h"
 
-using namespace std;
+// 在这里定义跟 Java 层 nativeNode/nativeEdge 一一对应的 C++ 结构
+struct CppNode {
+    int    index;
+    double x;
+    double y;
+    int    width;
+    int    height;
+    // TODO: 如果 Java 侧还有其他字段，继续在这里添加
+};
 
-// 一个小工具函数，把 Java List<Integer> 取到 C++ vector<int>
-vector<int> getNodeIdList(JNIEnv* env, jobject nativeLibraryObject) {
-    // 获取 class
-    jclass cls = env->GetObjectClass(nativeLibraryObject);
+struct CppEdge {
+    int from;
+    int to;
+    // TODO: 如果 Java 侧有权重、类型等字段，继续在这里添加
+};
 
-    // 获取 field id
-    jfieldID fid = env->GetFieldID(cls, "nodeIdList", "Ljava/util/List;");
-    jobject nodeIdListObj = env->GetObjectField(nativeLibraryObject, fid);
-    // List类和方法
-    jclass listCls = env->GetObjectClass(nodeIdListObj);
-    jmethodID sizeMethod = env->GetMethodID(listCls, "size", "()I");
-    jmethodID getMethod = env->GetMethodID(listCls, "get", "(I)Ljava/lang/Object;");
+JNIEXPORT void JNICALL
+Java_org_graph_outside_NativeLibrary_generateLayout(JNIEnv* env, jobject nativeLibraryObject) {
+    // ——1. 获取 nodeList/edgeList 字段引用——
+    jclass clsLib     = env->GetObjectClass(nativeLibraryObject);
+    jfieldID fidNodes = env->GetFieldID(clsLib, "nodeList", "Ljava/util/List;");
+    jfieldID fidEdges = env->GetFieldID(clsLib, "edgeList", "Ljava/util/List;");
 
-    jint size = env->CallIntMethod(nodeIdListObj, sizeMethod);
-    vector<int> nodeIds;
+    jobject jNodeList = env->GetObjectField(nativeLibraryObject, fidNodes);
+    jobject jEdgeList = env->GetObjectField(nativeLibraryObject, fidEdges);
 
-    for (jint i = 0; i < size; i++) {
-        jobject integerObj = env->CallObjectMethod(nodeIdListObj, getMethod, i);
-        // Integer.intValue()
-        jclass integerCls = env->GetObjectClass(integerObj);
-        jmethodID intValueMethod = env->GetMethodID(integerCls, "intValue", "()I");
-        jint value = env->CallIntMethod(integerObj, intValueMethod);
+    // ——2. 拿到 java.util.List 的 size 和 get 方法——
+    jclass clsList      = env->FindClass("java/util/List");
+    jmethodID midSize   = env->GetMethodID(clsList, "size", "()I");
+    jmethodID midGet    = env->GetMethodID(clsList, "get", "(I)Ljava/lang/Object;");
 
-        nodeIds.push_back((int)value);
+    // ——3. 读出所有 nativeNode ——
+    jint nodeCount = env->CallIntMethod(jNodeList, midSize);
+    std::vector<CppNode> nodes;
+    nodes.reserve(nodeCount);
 
-        env->DeleteLocalRef(integerObj);
-        env->DeleteLocalRef(integerCls);
+    // inner class JNI 名称：外部类$内部类
+    jclass clsNode     = env->FindClass("org/graph/outside/NativeLibrary$NativeNode");
+    jfieldID fidIndex  = env->GetFieldID(clsNode, "index", "I");
+    jfieldID fidX      = env->GetFieldID(clsNode, "x",     "D");
+    jfieldID fidY      = env->GetFieldID(clsNode, "y",     "D");
+    jfieldID fidWidth  = env->GetFieldID(clsNode, "width", "I");
+    jfieldID fidHeight = env->GetFieldID(clsNode, "height","I");
+
+
+    // 准备：拿到 Java 侧 processedEdgeList、List.add()
+    jfieldID fidProcEdges = env->GetFieldID(clsLib, "processedEdgeList", "Ljava/util/List;");
+    jobject jProcEdgeList = env->GetObjectField(nativeLibraryObject, fidProcEdges);
+    jmethodID midListAdd = env->GetMethodID(clsList, "add", "(Ljava/lang/Object;)Z");
+
+    // ProcessedEdge 类和构造器
+    jclass clsProcEdge = env->FindClass("org/graph/outside/NativeLibrary$ProcessedEdge");
+    jmethodID midProcEdgeCtor = env->GetMethodID(
+        clsProcEdge, "<init>", "(II)V"
+    );
+    // BendNode 类和构造器
+    jclass clsBendNode = env->FindClass("org/graph/outside/NativeLibrary$BendNode");
+    jmethodID midBendNodeCtor = env->GetMethodID(
+        clsBendNode, "<init>", "(DD)V"
+    );
+
+    // Integer.valueOf(int)
+    jclass clsInteger = env->FindClass("java/lang/Integer");
+    jmethodID midIntegerValueOf = env->GetStaticMethodID(
+        clsInteger, "valueOf", "(I)Ljava/lang/Integer;"
+    );
+    // FieldID：ProcessedEdge.bendNodes
+    jfieldID fidBendList = env->GetFieldID(
+        clsProcEdge, "bendNodes", "Ljava/util/List;"
+    );
+
+    for (jint i = 0; i < nodeCount; ++i) {
+        jobject jNode = env->CallObjectMethod(jNodeList, midGet, i);
+        CppNode n;
+        n.index  = env->GetIntField(jNode, fidIndex);
+        n.x      = env->GetDoubleField(jNode, fidX);
+        n.y      = env->GetDoubleField(jNode, fidY);
+        n.width  = env->GetIntField(jNode, fidWidth);
+        n.height = env->GetIntField(jNode, fidHeight);
+        // TODO: 读取其他字段
+
+        nodes.push_back(n);
+        env->DeleteLocalRef(jNode);
     }
 
-    env->DeleteLocalRef(listCls);
-    return nodeIds;
-}
+    // ——4. 读出所有 nativeEdge ——
+    jint edgeCount = env->CallIntMethod(jEdgeList, midSize);
+    std::vector<CppEdge> edges;
+    edges.reserve(edgeCount);
 
-// 取 edgeList 同理
-vector<string> getEdgeList(JNIEnv* env, jobject nativeLibraryObject) {
-    jclass cls = env->GetObjectClass(nativeLibraryObject);
-    jfieldID fid = env->GetFieldID(cls, "edgeList", "Ljava/util/List;");
-    jobject edgeListObj = env->GetObjectField(nativeLibraryObject, fid);
+    jclass clsEdge    = env->FindClass("org/graph/outside/NativeLibrary$NativeEdge");
+    jfieldID fidFrom  = env->GetFieldID(clsEdge, "from", "I");
+    jfieldID fidTo    = env->GetFieldID(clsEdge, "to",   "I");
+    // TODO: 如果还有其它字段，继续 GetFieldID
 
-    jclass listCls = env->GetObjectClass(edgeListObj);
-    jmethodID sizeMethod = env->GetMethodID(listCls, "size", "()I");
-    jmethodID getMethod = env->GetMethodID(listCls, "get", "(I)Ljava/lang/Object;");
+    for (jint i = 0; i < edgeCount; ++i) {
+        jobject jEdge = env->CallObjectMethod(jEdgeList, midGet, i);
+        CppEdge e;
+        e.from = env->GetIntField(jEdge, fidFrom);
+        e.to   = env->GetIntField(jEdge, fidTo);
+        // TODO: 读取其他字段
 
-    jint size = env->CallIntMethod(edgeListObj, sizeMethod);
-    vector<string> edges;
-
-    for (jint i = 0; i < size; i++) {
-        jobject strObj = env->CallObjectMethod(edgeListObj, getMethod, i);
-        const char* str = env->GetStringUTFChars((jstring)strObj, 0);
-
-        edges.push_back(string(str));
-
-        env->ReleaseStringUTFChars((jstring)strObj, str);
-        env->DeleteLocalRef(strObj);
+        edges.push_back(e);
+        env->DeleteLocalRef(jEdge);
     }
 
-    env->DeleteLocalRef(listCls);
-    return edges;
-}
-
-// 填充 processedNodeList
-void fillProcessedNodeList(JNIEnv* env, jobject nativeLibraryObject, vector<int>& nodeIds, vector<string>& edges, int width, int height) {
-
-
-    dialect::Graph_SP graph = make_shared<dialect::Graph>();
+    // ——5. 在这里对 nodes 和 edges 做任何你想要的 C++ 处理 ——
+    // 例如：简单打印出来
+    dialect::Graph_SP graph = std::make_shared<dialect::Graph>();
     dialect::Node_SP node;
     dialect::Edge_SP edge;
     dialect::NodesById nodesByExternalId;
 
-    for (int i=0;i<nodeIds.size();++i) {
+    for (auto & n : nodes) {
         node = dialect::Node::allocate();
-        node->setExternalId(nodeIds.at(i));
-        node->setDims(width, height);
+        node->setExternalId(n.index);
+        node->setCentre(n.x, n.y);
+        node->setDims(n.width, n.height);
         graph->addNode(node);
-        nodesByExternalId.insert({nodeIds.at(i), node});
+        nodesByExternalId.insert({n.index, node});
     }
 
-    for (int i=0;i<edges.size();++i) {
-        int fnode, tnode;
-        std::stringstream ss(edges.at(i));
-        std::string token;
-        // 先取第一个数字
-        if (std::getline(ss, token, '-')) {
-            fnode = std::stoi(token);
-        }
-        // 再取第二个数字
-        if (std::getline(ss, token, '-')) {
-            tnode = std::stoi(token);
-        }
-        edge = dialect::Edge::allocate(nodesByExternalId[fnode], nodesByExternalId[tnode]);
+    for (auto & e : edges) {
+        edge = dialect::Edge::allocate(nodesByExternalId[e.from], nodesByExternalId[e.to]);
         graph->addEdge(edge);
     }
     dialect::HolaOpts opts;
@@ -112,79 +141,69 @@ void fillProcessedNodeList(JNIEnv* env, jobject nativeLibraryObject, vector<int>
         std::cout << e.what() << std::endl;
     }
 
-    // 拿 NativeLibrary class
-    jclass nativeCls = env->GetObjectClass(nativeLibraryObject);
 
-    // 拿 processedNodeList field
-    jfieldID processedListFid = env->GetFieldID(nativeCls, "processedNodeList", "Ljava/util/List;");
-    jobject processedListObj = env->GetObjectField(nativeLibraryObject, processedListFid);
+    // 4. 遍历 list
+    jint count = env->CallIntMethod(jNodeList, midSize);
+    for (jint i = 0; i < count; ++i) {
+        // 4.1 取出第 i 个 nativeNode 对象
+        jobject jNode = env->CallObjectMethod(jNodeList, midGet, i);
 
-    // 拿 List的 add 方法
-    if (processedListObj == NULL) {
-        std::cerr << "Error: processedListObj is NULL!" << std::endl;
-        return;  // 或者适当的错误处理
+        // 4.2 读出它的 id
+        jint nodeId = env->GetIntField(jNode, fidIndex);
+
+        dialect::Node_SP node = nodesByExternalId[nodeId];
+
+        // 4.4 就地写回同一个对象
+        env->SetDoubleField(jNode, fidX, node->getCentre().x);
+        env->SetDoubleField(jNode, fidY, node->getCentre().y);
+
+        // 4.5 释放局部引用
+        env->DeleteLocalRef(jNode);
     }
 
-    jclass listCls = env->GetObjectClass(processedListObj);
-    if (listCls == NULL) {
-        std::cerr << "Error: Could not get class of the object!" << std::endl;
-        return;  // 或者适当的错误处理
-    }
-    jmethodID addMethod = env->GetMethodID(listCls, "add", "(Ljava/lang/Object;)Z");
+    // 遍历 C++ graph 边
+    for (const auto& edgePair : graph->getEdgeLookup()) {
+        auto edgeP = edgePair.second;
+        int fromId = edgeP->getSourceEnd()->getExternalId();
+        int toId   = edgeP->getTargetEnd()->getExternalId();
+        // new ProcessedEdge(...)
+        jobject jProcEdge = env->NewObject(
+            clsProcEdge, midProcEdgeCtor, fromId, toId
+        );
 
-    // 拿 ProcessedNode class
-    jclass processedNodeCls = env->FindClass("org/graph/outside/NativeLibrary$ProcessedNode");
-    jmethodID processedNodeCtor = env->GetMethodID(processedNodeCls, "<init>", "(Lorg/graph/outside/NativeLibrary;)V");
+        // 拿到 jProcEdge.bendNodes List 实例
+        jobject jBendList = env->GetObjectField(jProcEdge, fidBendList);
 
+        // 遍历所有折返点
+        for (auto &bend : edgeP->getBendNodes()) {
+            double x = bend->getCentre().x;
+            double y = bend->getCentre().y;
+            // new BendNode(x, y)
+            jobject jBendNode = env->NewObject(
+                clsBendNode, midBendNodeCtor, x, y
+            );
+            // jBendList.add(jBendNode)
+            env->CallBooleanMethod(jBendList, midListAdd, jBendNode);
+            env->DeleteLocalRef(jBendNode);
+        }
 
-    for (int id : nodeIds) {
+        // 最后把 jProcEdge 加到 processedEdgeList
+        env->CallBooleanMethod(jProcEdgeList, midListAdd, jProcEdge);
 
-        dialect::Node_SP node = nodesByExternalId[id];
-
-        // 创建 ProcessedNode 实例
-        jobject nodeObj = env->NewObject(processedNodeCls, processedNodeCtor, nativeLibraryObject);
-
-        // 设置 nodeId、x、y
-        jfieldID nodeIdFid = env->GetFieldID(processedNodeCls, "nodeId", "Ljava/lang/Integer;");
-        jfieldID xFid = env->GetFieldID(processedNodeCls, "x", "Ljava/lang/Double;");
-        jfieldID yFid = env->GetFieldID(processedNodeCls, "y", "Ljava/lang/Double;");
-
-        // 创建 Integer和Double对象
-        jclass integerCls = env->FindClass("java/lang/Integer");
-        jmethodID integerCtor = env->GetMethodID(integerCls, "<init>", "(I)V");
-        jobject nodeIdObj = env->NewObject(integerCls, integerCtor, id);
-
-        jclass doubleCls = env->FindClass("java/lang/Double");
-        jmethodID doubleCtor = env->GetMethodID(doubleCls, "<init>", "(D)V");
-        jobject xObj = env->NewObject(doubleCls, doubleCtor, node->getCentre().x); // just for example
-        jobject yObj = env->NewObject(doubleCls, doubleCtor, node->getCentre().y); // just for example
-
-        // 设置字段
-        env->SetObjectField(nodeObj, nodeIdFid, nodeIdObj);
-        env->SetObjectField(nodeObj, xFid, xObj);
-        env->SetObjectField(nodeObj, yFid, yObj);
-
-        // 加入 processedNodeList
-        env->CallBooleanMethod(processedListObj, addMethod, nodeObj);
-
-        // 回收局部引用
-        env->DeleteLocalRef(nodeIdObj);
-        env->DeleteLocalRef(xObj);
-        env->DeleteLocalRef(yObj);
-        env->DeleteLocalRef(nodeObj);
+        // 清理局部引用
+        env->DeleteLocalRef(jBendList);
+        env->DeleteLocalRef(jProcEdge);
     }
 
-    env->DeleteLocalRef(listCls);
-}
+    // ——6. 如果有必要，修改原始对象并写回 Java ——
+    // // e.g. env->SetDoubleField(jNode, fidX, newX);
+    // // 再 env->SetObjectField(thiz, fidNodes, jNodeList);
 
-JNIEXPORT void JNICALL Java_org_graph_outside_NativeLibrary_generateLayout(JNIEnv* env, jobject obj, jint width, jint height) {
-    vector<int> nodeIds = getNodeIdList(env, obj);
-    vector<string> edges = getEdgeList(env, obj);
-
-    // 这里可以做你的C++算法处理，比如layout计算
-    // 你也可以显式转成 int 用
-    int w = static_cast<int>(width);
-    int h = static_cast<int>(height);
-    // 处理完后写回processedNodeList
-    fillProcessedNodeList(env, obj, nodeIds, edges, w, h);
+    // 清理
+    env->DeleteLocalRef(jNodeList);
+    env->DeleteLocalRef(jEdgeList);
+    env->DeleteLocalRef(clsList);
+    env->DeleteLocalRef(clsNode);
+    env->DeleteLocalRef(clsEdge);
+    env->DeleteLocalRef(clsLib);
 }
