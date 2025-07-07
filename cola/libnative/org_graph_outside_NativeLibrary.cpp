@@ -13,8 +13,8 @@ struct CppNode {
     int    index;
     double x;
     double y;
-    int    width;
-    int    height;
+    double    width;
+    double    height;
     // TODO: 如果 Java 侧还有其他字段，继续在这里添加
 };
 
@@ -49,34 +49,13 @@ Java_org_graph_outside_NativeLibrary_generateLayout(JNIEnv* env, jobject nativeL
     jfieldID fidIndex  = env->GetFieldID(clsNode, "index", "I");
     jfieldID fidX      = env->GetFieldID(clsNode, "x",     "D");
     jfieldID fidY      = env->GetFieldID(clsNode, "y",     "D");
-    jfieldID fidWidth  = env->GetFieldID(clsNode, "width", "I");
-    jfieldID fidHeight = env->GetFieldID(clsNode, "height","I");
-
-
-    // 准备：拿到 Java 侧 processedEdgeList、List.add()
-    jfieldID fidProcEdges = env->GetFieldID(clsLib, "processedEdgeList", "Ljava/util/List;");
-    jobject jProcEdgeList = env->GetObjectField(nativeLibraryObject, fidProcEdges);
-    jmethodID midListAdd = env->GetMethodID(clsList, "add", "(Ljava/lang/Object;)Z");
-
-    // ProcessedEdge 类和构造器
-    jclass clsProcEdge = env->FindClass("org/graph/outside/NativeLibrary$ProcessedEdge");
-    jmethodID midProcEdgeCtor = env->GetMethodID(
-        clsProcEdge, "<init>", "(II)V"
-    );
-    // BendNode 类和构造器
-    jclass clsBendNode = env->FindClass("org/graph/outside/NativeLibrary$BendNode");
-    jmethodID midBendNodeCtor = env->GetMethodID(
-        clsBendNode, "<init>", "(DD)V"
-    );
+    jfieldID fidWidth  = env->GetFieldID(clsNode, "width", "D");
+    jfieldID fidHeight = env->GetFieldID(clsNode, "height","D");
 
     // Integer.valueOf(int)
     jclass clsInteger = env->FindClass("java/lang/Integer");
     jmethodID midIntegerValueOf = env->GetStaticMethodID(
         clsInteger, "valueOf", "(I)Ljava/lang/Integer;"
-    );
-    // FieldID：ProcessedEdge.bendNodes
-    jfieldID fidBendList = env->GetFieldID(
-        clsProcEdge, "bendNodes", "Ljava/util/List;"
     );
 
     for (jint i = 0; i < nodeCount; ++i) {
@@ -85,8 +64,8 @@ Java_org_graph_outside_NativeLibrary_generateLayout(JNIEnv* env, jobject nativeL
         n.index  = env->GetIntField(jNode, fidIndex);
         n.x      = env->GetDoubleField(jNode, fidX);
         n.y      = env->GetDoubleField(jNode, fidY);
-        n.width  = env->GetIntField(jNode, fidWidth);
-        n.height = env->GetIntField(jNode, fidHeight);
+        n.width  = env->GetDoubleField(jNode, fidWidth);
+        n.height = env->GetDoubleField(jNode, fidHeight);
         // TODO: 读取其他字段
 
         nodes.push_back(n);
@@ -160,45 +139,6 @@ Java_org_graph_outside_NativeLibrary_generateLayout(JNIEnv* env, jobject nativeL
         // 4.5 释放局部引用
         env->DeleteLocalRef(jNode);
     }
-
-    // 遍历 C++ graph 边
-    for (const auto& edgePair : graph->getEdgeLookup()) {
-        auto edgeP = edgePair.second;
-        int fromId = edgeP->getSourceEnd()->getExternalId();
-        int toId   = edgeP->getTargetEnd()->getExternalId();
-        // new ProcessedEdge(...)
-        jobject jProcEdge = env->NewObject(
-            clsProcEdge, midProcEdgeCtor, fromId, toId
-        );
-
-        // 拿到 jProcEdge.bendNodes List 实例
-        jobject jBendList = env->GetObjectField(jProcEdge, fidBendList);
-
-        // 遍历所有折返点
-        for (auto &bend : edgeP->getBendNodes()) {
-            double x = bend->getCentre().x;
-            double y = bend->getCentre().y;
-            // new BendNode(x, y)
-            jobject jBendNode = env->NewObject(
-                clsBendNode, midBendNodeCtor, x, y
-            );
-            // jBendList.add(jBendNode)
-            env->CallBooleanMethod(jBendList, midListAdd, jBendNode);
-            env->DeleteLocalRef(jBendNode);
-        }
-
-        // 最后把 jProcEdge 加到 processedEdgeList
-        env->CallBooleanMethod(jProcEdgeList, midListAdd, jProcEdge);
-
-        // 清理局部引用
-        env->DeleteLocalRef(jBendList);
-        env->DeleteLocalRef(jProcEdge);
-    }
-
-    // ——6. 如果有必要，修改原始对象并写回 Java ——
-    // // e.g. env->SetDoubleField(jNode, fidX, newX);
-    // // 再 env->SetObjectField(thiz, fidNodes, jNodeList);
-
     // 清理
     env->DeleteLocalRef(jNodeList);
     env->DeleteLocalRef(jEdgeList);
