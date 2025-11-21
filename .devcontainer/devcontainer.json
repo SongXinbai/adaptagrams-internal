@@ -1,0 +1,20 @@
+{
+    "name": "C++ Dev Container",
+    "dockerFile": "Dockerfile",
+
+    // 挂载本地项目
+    "context": "..",
+
+    // 安装一些 VS Code 推荐扩展
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-vscode.cpptools",
+                "ms-vscode.cmake-tools",
+                "twxs.cmake"
+            ]
+        }
+    },
+    // 使用非 root 用户（可选）
+    "remoteUser": "vscode"
+}

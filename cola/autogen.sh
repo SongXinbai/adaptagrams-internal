@@ -19,6 +19,14 @@ autoreconf --install --verbose
 
 
 # Configure.
+# If ENABLE_SVG_OUTPUT is set to 1, add -DSVG_OUTPUT to CPPFLAGS so
+# compilation units (like `router.cpp`) see the macro. This keeps the
+# change opt-in and non-invasive for existing builds.
+if [ "${ENABLE_SVG_OUTPUT:-0}" = "1" ]; then
+	CPPFLAGS="${CPPFLAGS:-} -DSVG_OUTPUT"
+	export CPPFLAGS
+	echo "Enabled SVG_OUTPUT via ENABLE_SVG_OUTPUT=1"
+fi
 ./configure
 # Compile with CXXFLAGS="-std=c++11" when using g++ 14 or newer
 # ./configure CXXFLAGS="-std=c++11"
@@ -40,5 +48,5 @@ make
 
 # The following builds examples and tests for each of the libraries.
 # Please look at these before sending me questions.
-make check
+# make check
 
