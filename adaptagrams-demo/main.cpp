@@ -50,6 +50,13 @@ struct Port {
     Avoid::Point position; // absolute position for SVG markers
 };
 
+struct Rect {
+    double xmin;
+    double ymin;
+    double xmax;
+    double ymax;
+};
+
 struct RoutedEdge {
     int edgeId;
     EdgeType type;
@@ -175,7 +182,8 @@ void layoutNodesWithCola(std::vector<Node>& nodes, const std::vector<Edge>& edge
 std::vector<Port> createPortsForNodes(const std::vector<Node>& nodes,
                                       const std::vector<Edge>& edges,
                                       Avoid::Router& router,
-                                      std::vector<Avoid::ShapeRef*>& shapes) {
+                                      std::vector<Avoid::ShapeRef*>& shapes,
+                                      std::unordered_map<int, Avoid::ShapeRef*>& shapeByNode) {
     std::unordered_map<int, int> degree;
     for (const auto& e : edges) {
         degree[e.sourceId]++;
@@ -185,12 +193,13 @@ std::vector<Port> createPortsForNodes(const std::vector<Node>& nodes,
     std::vector<Port> ports;
     unsigned nextClassId = 1; // Avoid pins must be non-zero
 
+    const double obstacleBuffer = 6.0; // expand rectangles slightly to keep connectors away
     shapes.reserve(nodes.size());
     for (const auto& node : nodes) {
-        const double left = node.x - node.width / 2.0;
-        const double right = node.x + node.width / 2.0;
-        const double top = node.y - node.height / 2.0;
-        const double bottom = node.y + node.height / 2.0;
+        const double left = node.x - node.width / 2.0 - obstacleBuffer;
+        const double right = node.x + node.width / 2.0 + obstacleBuffer;
+        const double top = node.y - node.height / 2.0 - obstacleBuffer;
+        const double bottom = node.y + node.height / 2.0 + obstacleBuffer;
 
         Avoid::Polygon poly(4);
         poly.ps[0] = Avoid::Point(left, top);
@@ -198,8 +207,10 @@ std::vector<Port> createPortsForNodes(const std::vector<Node>& nodes,
         poly.ps[2] = Avoid::Point(right, bottom);
         poly.ps[3] = Avoid::Point(left, bottom);
 
+        // Each ShapeRef is a real obstacle the orthogonal router must avoid.
         auto* shapeRef = new Avoid::ShapeRef(&router, poly, static_cast<unsigned>(node.id + 1));
         shapes.push_back(shapeRef);
+        shapeByNode[node.id] = shapeRef;
 
         const int count = std::max(2, degree[node.id]);
         for (int i = 0; i < count; ++i) {
@@ -219,12 +230,13 @@ std::vector<Port> createPortsForNodes(const std::vector<Node>& nodes,
                 yPortion = (i + 1.0) / (count + 1.0);
                 break;
             }
+            // Attach pins directly to the ShapeRef using relative edge coordinates.
             auto* pin = new Avoid::ShapeConnectionPin(
                 shapeRef, nextClassId, xPortion, yPortion, true, 0.0,
                 Avoid::ConnDirAll);
 
-            const double px = left + xPortion * node.width;
-            const double py = top + yPortion * node.height;
+            const double px = (node.x - node.width / 2.0) + xPortion * node.width;
+            const double py = (node.y - node.height / 2.0) + yPortion * node.height;
             ports.push_back({static_cast<int>(ports.size()), node.id, nextClassId, Avoid::Point(px, py)});
             ++nextClassId;
             (void)pin; // Pins are owned by the router/shape, no extra bookkeeping needed.
@@ -238,8 +250,9 @@ std::vector<RoutedEdge> routeEdgesWithAvoid(const std::vector<Node>& nodes,
                                             const std::vector<Edge>& edges,
                                             const std::vector<Port>& ports,
                                             const std::vector<Avoid::ShapeRef*>& shapes,
+                                            const std::unordered_map<int, Avoid::ShapeRef*>& shapeByNode,
                                             Avoid::Router& router) {
-    NodeIndexMap indexMap = buildNodeIndexMap(nodes);
+    (void)shapes; // Shapes are stored for completeness but routing uses the id map directly.
 
     // Build lookup from nodeId -> list of port class IDs for round-robin use.
     std::unordered_map<int, std::vector<unsigned>> portsPerNode;
@@ -272,8 +285,8 @@ std::vector<RoutedEdge> routeEdgesWithAvoid(const std::vector<Node>& nodes,
         if (e.type != EdgeType::Overhead) continue;
         unsigned srcClass = nextPortFor(e.sourceId);
         unsigned tgtClass = nextPortFor(e.targetId);
-        Avoid::ConnEnd src(shapes[indexMap[e.sourceId]], srcClass);
-        Avoid::ConnEnd dst(shapes[indexMap[e.targetId]], tgtClass);
+        Avoid::ConnEnd src(shapeByNode.at(e.sourceId), srcClass);
+        Avoid::ConnEnd dst(shapeByNode.at(e.targetId), tgtClass);
         auto* conn = new Avoid::ConnRef(&router, src, dst, static_cast<unsigned>(e.id + 100));
         overheadConns.push_back({e.id, conn});
     }
@@ -285,8 +298,8 @@ std::vector<RoutedEdge> routeEdgesWithAvoid(const std::vector<Node>& nodes,
         if (e.type != EdgeType::Normal) continue;
         unsigned srcClass = nextPortFor(e.sourceId);
         unsigned tgtClass = nextPortFor(e.targetId);
-        Avoid::ConnEnd src(shapes[indexMap[e.sourceId]], srcClass);
-        Avoid::ConnEnd dst(shapes[indexMap[e.targetId]], tgtClass);
+        Avoid::ConnEnd src(shapeByNode.at(e.sourceId), srcClass);
+        Avoid::ConnEnd dst(shapeByNode.at(e.targetId), tgtClass);
         auto* conn = new Avoid::ConnRef(&router, src, dst, static_cast<unsigned>(e.id + 200));
         normalConns.push_back({e.id, conn});
     }
@@ -334,6 +347,83 @@ static bool segmentsIntersect(const std::pair<double, double>& a1,
     const double t = cross(dx, dy, dxb, dyb) / denom;
     const double u = cross(dx, dy, dxa, dya) / denom;
     return t > 0.0 && t < 1.0 && u > 0.0 && u < 1.0;
+}
+
+bool segmentCrossesInterior(const std::pair<double, double>& a,
+                            const std::pair<double, double>& b,
+                            const Rect& r) {
+    // Work with a slightly shrunken rectangle so boundary touches at ports are allowed.
+    const double eps = 1e-6;
+    const double xmin = r.xmin + eps;
+    const double xmax = r.xmax - eps;
+    const double ymin = r.ymin + eps;
+    const double ymax = r.ymax - eps;
+
+    auto inside = [&](const std::pair<double, double>& p) {
+        return p.first > xmin && p.first < xmax && p.second > ymin && p.second < ymax;
+    };
+
+    if (inside(a) || inside(b)) {
+        return true; // endpoint is strictly inside interior
+    }
+
+    // Liang-Barsky clipping against the shrunken rectangle
+    const double dx = b.first - a.first;
+    const double dy = b.second - a.second;
+    double t0 = 0.0, t1 = 1.0;
+    auto clip = [&](double p, double q) {
+        if (std::fabs(p) < 1e-12) {
+            return q >= 0.0; // Parallel and outside -> reject
+        }
+        double rparam = q / p;
+        if (p < 0.0) {
+            if (rparam > t1) return false;
+            if (rparam > t0) t0 = rparam;
+        } else {
+            if (rparam < t0) return false;
+            if (rparam < t1) t1 = rparam;
+        }
+        return true;
+    };
+
+    if (!clip(-dx, a.first - xmin)) return false;
+    if (!clip(dx, xmax - a.first)) return false;
+    if (!clip(-dy, a.second - ymin)) return false;
+    if (!clip(dy, ymax - a.second)) return false;
+
+    // If there is a non-degenerate clipped segment inside the rectangle, it's a crossing.
+    return t0 < t1 && (t0 > eps || t1 < 1.0 - eps);
+}
+
+void validateNoEdgeShapeIntersections(const std::vector<Node>& nodes,
+                                      const std::vector<RoutedEdge>& routedEdges) {
+    std::vector<Rect> rects;
+    rects.reserve(nodes.size());
+    for (const auto& n : nodes) {
+        const double xmin = n.x - n.width / 2.0;
+        const double xmax = n.x + n.width / 2.0;
+        const double ymin = n.y - n.height / 2.0;
+        const double ymax = n.y + n.height / 2.0;
+        rects.push_back({xmin, ymin, xmax, ymax});
+    }
+
+    bool anyError = false;
+    for (const auto& e : routedEdges) {
+        for (std::size_t i = 1; i < e.points.size(); ++i) {
+            const auto& a = e.points[i - 1];
+            const auto& b = e.points[i];
+            for (std::size_t nIdx = 0; nIdx < rects.size(); ++nIdx) {
+                if (segmentCrossesInterior(a, b, rects[nIdx])) {
+                    std::cout << "ERROR: edge " << e.edgeId << " crosses node " << nodes[nIdx].id << "\n";
+                    anyError = true;
+                }
+            }
+        }
+    }
+
+    if (!anyError) {
+        std::cout << "Validation OK: no connector crosses any node rectangle." << std::endl;
+    }
 }
 
 double computeLayoutScore(const std::vector<RoutedEdge>& routedEdges) {
@@ -444,12 +534,14 @@ int main() {
 
     Avoid::Router router(Avoid::PolyLineRouting | Avoid::OrthogonalRouting);
     std::vector<Avoid::ShapeRef*> shapes;
-    auto ports = createPortsForNodes(nodes, edges, router, shapes);
+    std::unordered_map<int, Avoid::ShapeRef*> shapeByNode;
+    auto ports = createPortsForNodes(nodes, edges, router, shapes, shapeByNode);
 
-    auto routedEdges = routeEdgesWithAvoid(nodes, edges, ports, shapes, router);
+    auto routedEdges = routeEdgesWithAvoid(nodes, edges, ports, shapes, shapeByNode, router);
     const double score = computeLayoutScore(routedEdges);
 
     exportToSvg("output.svg", nodes, ports, routedEdges);
+    validateNoEdgeShapeIntersections(nodes, routedEdges);
 
     std::cout << "Simple score (length + penalties): " << score << "\n";
     std::cout << "Wrote output.svg – open it in a browser." << std::endl;
