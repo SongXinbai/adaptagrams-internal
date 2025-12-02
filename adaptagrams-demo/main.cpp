@@ -15,7 +15,11 @@
 
 // Simple demo of using Adaptagrams (libcola + libavoid) to layout
 // and route a tiny orthogonal diagram. The goal is readability rather
-// than raw performance or exhaustive API coverage.
+// than raw performance or exhaustive API coverage.  We intentionally
+// use libcola instead of libdialect's HOLA because this example leans on
+// ideal-position hints and explicit separation constraints; HOLA is
+// excellent for quick, small topologies without positional guidance, but
+// cola gives us the soft constraints we need here.
 
 enum class NodeType { BigRect, SmallRect, Square };
 enum class EdgeType { Overhead, Normal };
